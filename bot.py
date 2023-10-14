@@ -1,9 +1,9 @@
+from constants import *
+from db_utils import connect_to_database
+
 import os
 import logging
 from datetime import datetime
-
-import json
-
 import pymysql
 
 from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
@@ -23,50 +23,15 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-# GLOBAL VARIABLES
-
-shift_dict = {
-    "E": 8.5,
-    "E6": 8.5,
-    "E7": 8.5,
-    "E8": 8.5,
-    "E9": 8.5,
-    "CA": 8.5,
-    "CA1": 8.5,
-    "CAF": 10,
-    "F10": 10,
-    "F11": 10,
-    "F12": 10,
-    "F8": 10,
-    "F9": 10,
-    "M": 8.5,
-    "M12": 8.5,
-    "L": 8.5,
-    "L1": 8.5,
-    "L2": 8,
-    "L3": 7,
-    "L4": 6,
-    "L5": 5,
-}
-
-
-ADD_BUTTON_TEXT = '/add'
-EDIT_BUTTON_TEXT = '/edit'
-SUMMARY_BUTTON_TEXT = '/summary'
-
-INITIATION = 0
-CHECK_DATE, CHECK_SHIFT_TYPE, CONFIRM_DATA_ENTRY = range(1, 4)
-CHECK_DATE_FOR_EDIT, CHECK_EDIT_OR_DELETE, EDIT_SHIFT_TYPE = range(4, 7)
-
-RATE_PER_HOUR = 15
-AUTHORIZED_USERNAMES = ['terrykms', 'q000xd']
-
 # in-memory usage before adding into a database
 in_memory_data = {}
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
+    user_text = update.message.text
+
+    logger.info("Message sent by %s: %s", user.username, user_text)
     if user.username not in AUTHORIZED_USERNAMES:
         await update.message.reply_text("You are not authorized to use this bot.")
         return ConversationHandler.END
@@ -116,18 +81,12 @@ async def check_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('Error in recognising date. Please ensure format is in DD/MM/YYYY.')
         return CHECK_DATE
 
-    try:
-        connection = pymysql.connect(
-            host=os.environ.get('ENDPOINT'),
-            port=3306,
-            user=os.environ.get('RDS_USERNAME'),
-            password=os.environ.get('RDS_PASSWORD'),
-            database=os.environ.get('DATABASE')
-        )
-    except pymysql.Error as e:
-        logger.error(e)
-        await update.message.reply_text("Could not connect to database, try again later. /start")
-        return ConversationHandler.END
+    connection, status = connect_to_database()
+
+    if connection is None:
+        logger.error(status.error)
+        await update.message.reply_text(status.message)
+        return status.state
 
     cursor = connection.cursor()
 
@@ -158,7 +117,7 @@ async def check_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     in_memory_data['date'] = user_text
     keyboard = []
-    for i, key in enumerate(shift_dict):
+    for i, key in enumerate(SHIFT_DICT):
         if i % 2 == 0:
             keyboard.append([KeyboardButton(text=key)])
         else:
@@ -181,7 +140,7 @@ async def check_shift_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     date = in_memory_data['date']
     shift = in_memory_data['shift']
-    total_earned = float(shift_dict[shift]) * RATE_PER_HOUR
+    total_earned = float(SHIFT_DICT[shift]) * RATE_PER_HOUR
 
     message = f"Confirming data entry: \n\n Date: {date} \n Shift: {shift} \n ---------- \n Total earned: ${total_earned:.2f}"
 
@@ -205,20 +164,13 @@ async def confirm_data_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if user_text == 'Yes':
 
-        try:
-            connection = pymysql.connect(
-                host=os.environ.get('ENDPOINT'),
-                port=3306,
-                user=os.environ.get('RDS_USERNAME'),
-                password=os.environ.get('RDS_PASSWORD'),
-                database=os.environ.get('DATABASE')
-            )
-        except pymysql.Error as e:
-            logger.error(e)
-            await update.message.reply_text("Could not connect to database, try again later. /start")
-            return ConversationHandler.END
+        connection, status = connect_to_database()
 
-        # INCOMPLETE
+        if connection is None:
+            logger.error(status.error)
+            await update.message.reply_text(status.message)
+            return status.state
+
         cursor = connection.cursor()
 
         try:
@@ -255,18 +207,13 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_date_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_text = update.message.text
-    try:
-        connection = pymysql.connect(
-            host=os.environ.get('ENDPOINT'),
-            port=3306,
-            user=os.environ.get('RDS_USERNAME'),
-            password=os.environ.get('RDS_PASSWORD'),
-            database=os.environ.get('DATABASE')
-        )
-    except pymysql.Error as e:
-        logger.error(e)
-        await update.message.reply_text("Could not connect to database, try again later. /start")
-        return ConversationHandler.END
+
+    connection, status = connect_to_database()
+
+    if connection is None:
+        logger.error(status.error)
+        await update.message.reply_text(status.message)
+        return status.state
 
     cursor = connection.cursor()
 
@@ -292,13 +239,13 @@ async def check_date_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return INITIATION
 
     fields = [field_md[0] for field_md in cursor.description]
-    result = dict(zip(fields, cursor.fetchone()))
+    result = dict(zip(fields, data))
 
     in_memory_data['date_to_edit'] = user_text
     in_memory_data['id'] = result['id']
 
     logger.info(f'Data found for date: {user_text}')
-    message = f"Data found: \n\n Date: {user_text}\n Shift: {result['shift_type']} \n\n Edit -> Change Shift Type \n Delete - Remove data \n Cancel - Undo Command"
+    message = f"Data found: \n\n Date: {user_text}\n Shift: {result['shift_type']} \n\n Edit - Change Shift Type \n Delete - Remove data \n Cancel - Undo Command"
     keyboard = [[
         KeyboardButton(text='Edit'),
         KeyboardButton(text='Delete'),
@@ -321,18 +268,12 @@ async def check_edit_or_delete(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"Did not remove data records on {in_memory_data['date_to_edit']}. Press /add to key in a new entry, or /cancel to end the conversation.")
         return INITIATION
 
-    try:
-        connection = pymysql.connect(
-            host=os.environ.get('ENDPOINT'),
-            port=3306,
-            user=os.environ.get('RDS_USERNAME'),
-            password=os.environ.get('RDS_PASSWORD'),
-            database=os.environ.get('DATABASE')
-        )
-    except pymysql.Error as e:
-        logger.error(e)
-        await update.message.reply_text("Could not connect to database, try again later. /start")
-        return ConversationHandler.END
+    connection, status = connect_to_database()
+
+    if connection is None:
+        logger.error(status.error)
+        await update.message.reply_text(status.message)
+        return status.state
 
     cursor = connection.cursor()
 
@@ -359,7 +300,7 @@ async def check_edit_or_delete(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if user_text == "Edit":
         keyboard = []
-        for i, key in enumerate(shift_dict):
+        for i, key in enumerate(SHIFT_DICT):
             if i % 2 == 0:
                 keyboard.append([KeyboardButton(text=key)])
             else:
@@ -376,20 +317,16 @@ async def check_edit_or_delete(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def edit_shift_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
-    try:
-        connection = pymysql.connect(
-            host=os.environ.get('ENDPOINT'),
-            port=3306,
-            user=os.environ.get('RDS_USERNAME'),
-            password=os.environ.get('RDS_PASSWORD'),
-            database=os.environ.get('DATABASE')
-        )
-    except pymysql.Error as e:
-        logger.error(e)
-        await update.message.reply_text("Could not connect to database, try again later. /start")
-        return ConversationHandler.END
+
+    connection, status = connect_to_database()
+
+    if connection is None:
+        logger.error(status.error)
+        await update.message.reply_text(status.message)
+        return status.state
 
     cursor = connection.cursor()
+
     try:
         edit_query = "UPDATE Entries SET shift_type=%s WHERE id=%s"
         data_entry = (user_text, in_memory_data['id'])
@@ -414,18 +351,12 @@ async def edit_shift_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
 
-    try:
-        connection = pymysql.connect(
-            host=os.environ.get('ENDPOINT'),
-            port=3306,
-            user=os.environ.get('RDS_USERNAME'),
-            password=os.environ.get('RDS_PASSWORD'),
-            database=os.environ.get('DATABASE')
-        )
-    except pymysql.Error as e:
-        logger.error(e)
-        await update.message.reply_text("Could not connect to database, try again later. /start")
-        return ConversationHandler.END
+    connection, status = connect_to_database()
+
+    if connection is None:
+        logger.error(status.error)
+        await update.message.reply_text(status.message)
+        return status.state
 
     cursor = connection.cursor()
 
@@ -446,11 +377,10 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     payroll_cutoff_date = 15
 
     for i, result in enumerate(results):
-        logger.info(result)
 
         date = result['shift_date']
         shift = result['shift_type']
-        total_earned = float(shift_dict[shift]) * RATE_PER_HOUR
+        total_earned = float(SHIFT_DICT[shift]) * RATE_PER_HOUR
 
         if i == 0:
             message += f"{date}: ${total_earned:.2f} ({shift})\n"
@@ -512,49 +442,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-# async def check_start_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     user = update.message.from_user
-#     user_text = update.message.text
-
-#     logger.info("Message sent by %s: %s", user.username, user_text)
-
-#     time_format = '%H%M'
-#     try:
-#         datetime.strptime(user_text, time_format)
-#     except ValueError:
-#         await update.message.reply_text('Error in recognising time. Please ensure format is in 24-HOUR format.')
-#         return CHECK_START_TIME
-
-#     await update.message.reply_text("Ending time in 24-HOUR format (i.e. 2000).")
-#     return CHECK_END_TIME
-
-
-# async def check_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     user = update.message.from_user
-#     user_text = update.message.text
-
-#     logger.info("Message sent by %s: %s", user.username, user_text)
-
-#     time_format = '%H%M'
-#     try:
-#         datetime.strptime(user_text, time_format)
-#     except ValueError:
-#         await update.message.reply_text('Error in recognising time. Please ensure format is in 24-HOUR format.')
-#         return CHECK_END_TIME
-
-
-#     await update.message.reply_text("Total break duration in hours. (i.e. 1, 2...)")
-#     return CHECK_BREAK_DURATION
-
-# async def check_break_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     user = update.message.from_user
-#     user_text = update.message.text
-
-#     if
-
-#     logger.info("Message sent by %s: %s", user.username, update.message.text)
-
-#     await update.message.reply_text(f"{user.username}, thanks")
-#     return ConversationHandler.END
